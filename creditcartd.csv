@@ -1,0 +1,67 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+
+# Generate random dataset
+np.random.seed(42)
+n = 500
+data = pd.DataFrame({
+    'Gender': np.random.choice(['Male', 'Female'], n),
+    'Age': np.random.randint(18, 65, n),
+    'SubscriptionPlan': np.random.choice(['Basic', 'Standard', 'Premium'], n),
+    'MonthlyUsageHours': np.random.normal(40, 12, n).astype(int),
+    'TenureMonths': np.random.randint(1, 36, n),
+    'SupportTickets': np.random.randint(0, 6, n),
+    'PaymentMethod': np.random.choice(['Credit Card', 'UPI', 'Net Banking'], n),
+})
+
+# Churn condition
+data['Churn'] = np.where(
+    (data['TenureMonths'] < 6) & (data['MonthlyUsageHours'] < 30), 
+    1, 
+    np.random.choice([0, 1], size=n, p=[0.8, 0.2])
+)
+
+# Save dataset (optional)
+data.to_csv("churn_data_sample.csv", index=False)
+
+# Encode categorical data
+label_encoders = {}
+for col in ['Gender', 'SubscriptionPlan', 'PaymentMethod']:
+    le = LabelEncoder()
+    data[col] = le.fit_transform(data[col])
+    label_encoders[col] = le
+
+# Prepare training data
+X = data.drop('Churn', axis=1)
+y = data['Churn']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Logistic Regression
+log_model = LogisticRegression()
+log_model.fit(X_train, y_train)
+y_pred_log = log_model.predict(X_test)
+print("\n--- Logistic Regression ---")
+print("Accuracy:", accuracy_score(y_test, y_pred_log))
+print(classification_report(y_test, y_pred_log))
+
+# Random Forest
+rf_model = RandomForestClassifier()
+rf_model.fit(X_train, y_train)
+y_pred_rf = rf_model.predict(X_test)
+print("\n--- Random Forest ---")
+print("Accuracy:", accuracy_score(y_test, y_pred_rf))
+print(classification_report(y_test, y_pred_rf))
+
+# Confusion matrix
+sns.heatmap(confusion_matrix(y_test, y_pred_rf), annot=True, fmt='d', cmap='Blues')
+plt.title("Random Forest Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.show()

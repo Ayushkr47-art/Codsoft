@@ -1,0 +1,257 @@
+import pandas as pd
+import numpy as np
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC # LinearSVC is often preferred for large text datasets with SVMs
+from sklearn.multiclass import OneVsRestClassifier # For handling multi-label classification
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# --- 1. Download NLTK Resources (Run once) ---
+try:
+    nltk.data.find('corpora/stopwords')
+except nltk.downloader.DownloadError:
+    nltk.download('stopwords')
+try:
+    nltk.data.find('corpora/wordnet')
+except nltk.downloader.DownloadError:
+    nltk.download('wordnet')
+
+# --- 2. Data Loading and Initial Exploration ---
+print("--- 1. Loading Data ---")
+# Adjust the file path and column names based on your dataset
+# Example dataset: 'wiki_movie_plots_deduped.csv' or similar from Kaggle
+try:
+    # A common dataset format for movie genre prediction
+    df = pd.read_csv('wiki_movie_plots_deduped.csv')
+    df = df[['Plot', 'Genre']] # Assuming 'Plot' for summary and 'Genre' for genres
+    df.columns = ['plot_summary', 'genre'] # Standardize column names
+except FileNotFoundError:
+    print("Error: 'wiki_movie_plots_deduped.csv' not found.")
+    print("Please download a movie plot dataset (e.g., from Kaggle) and place it in the same directory.")
+    print("Trying a different common dataset name...")
+    try:
+        df = pd.read_csv('MovieGenre.csv', encoding='latin-1')
+        df = df[['Plot', 'Genre']] # Adjust if your dataset has different column names
+        df.columns = ['plot_summary', 'genre']
+    except FileNotFoundError:
+        print("Error: 'MovieGenre.csv' also not found. Please provide a valid dataset.")
+        exit() # Exit if no suitable dataset is found
+
+# Drop rows with missing values in 'plot_summary' or 'genre'
+df.dropna(subset=['plot_summary', 'genre'], inplace=True)
+
+# Some datasets have 'genre' as a comma-separated string, convert to list of strings
+df['genre'] = df['genre'].apply(lambda x: [g.strip() for g in str(x).split(',') if g.strip()])
+
+# Filter out rows where genres list is empty after splitting
+df = df[df['genre'].apply(lambda x: len(x) > 0)]
+
+print("Dataset head:")
+print(df.head())
+print("\nNumber of samples:", len(df))
+print("\nUnique genres (first 20):", df['genre'].explode().unique()[:20]) # Explode to see individual genres
+print("-" * 50)
+
+# --- 3. Data Preprocessing ---
+print("--- 2. Preprocessing Text Data ---")
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
+
+def preprocess_text(text):
+    # Convert to lowercase
+    text = text.lower()
+    # Remove special characters, numbers, and punctuation
+    text = re.sub(r'[^a-z\s]', '', text)
+    # Tokenize
+    words = text.split()
+    # Remove stopwords and apply lemmatization
+    words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
+    return ' '.join(words)
+
+df['processed_plot'] = df['plot_summary'].apply(preprocess_text)
+
+print("Processed plot example:")
+print(df['processed_plot'].iloc[0])
+print("-" * 50)
+
+# --- 4. Prepare for Multi-Label Classification ---
+print("--- 3. Preparing for Multi-Label Classification ---")
+mlb = MultiLabelBinarizer()
+# Fit and transform the genre column
+y_genres = mlb.fit_transform(df['genre'])
+genre_labels = mlb.classes_
+
+print(f"Number of unique genres: {len(genre_labels)}")
+print(f"Example binarized genres for first movie: {y_genres[0]}")
+print(f"Corresponding genres: {df['genre'].iloc[0]}")
+print("-" * 50)
+
+# --- 5. Feature Engineering ---
+
+#### A. TF-IDF (Term Frequency-Inverse Document Frequency) ####
+print("--- 4. Feature Engineering: TF-IDF ---")
+# Split data for TF-IDF
+X_train_tfidf, X_test_tfidf, y_train_tfidf, y_test_tfidf = train_test_split(
+    df['processed_plot'], y_genres, test_size=0.2, random_state=42
+)
+
+tfidf_vectorizer = TfidfVectorizer(max_features=10000, stop_words='english') # Max features for larger vocab
+X_train_tfidf_vec = tfidf_vectorizer.fit_transform(X_train_tfidf)
+X_test_tfidf_vec = tfidf_vectorizer.transform(X_test_tfidf)
+
+print("TF-IDF training feature shape:", X_train_tfidf_vec.shape)
+print("-" * 50)
+
+#### B. Word Embeddings (Using Pre-trained GloVe) ####
+# Note: For large datasets and complex relationships, deep learning models (CNN, LSTM)
+# combined with word embeddings usually perform best. Here, we'll use average embeddings
+# for traditional ML classifiers.
+print("--- 5. Feature Engineering: Word Embeddings (GloVe) ---")
+
+# Ensure you have the GloVe file (e.g., 'glove.6B.100d.txt') in your directory
+# Download from: https://nlp.stanford.edu/projects/glove/
+glove_path = 'glove.6B.100d.txt'
+embeddings_index = {}
+run_word_embeddings = False
+try:
+    with open(glove_path, encoding='utf-8') as f:
+        for line in f:
+            values = line.split()
+            word = values[0]
+            coefs = np.asarray(values[1:], dtype='float32')
+            embeddings_index[word] = coefs
+    print(f"Loaded {len(embeddings_index)} word vectors from {glove_path}")
+    run_word_embeddings = True
+except FileNotFoundError:
+    print(f"Warning: GloVe file '{glove_path}' not found. Please download it and place it in the same directory.")
+    print("Skipping Word Embeddings feature creation.")
+
+if run_word_embeddings:
+    embedding_dim = 100 # Dimension of your GloVe vectors (e.g., 100d)
+
+    def get_avg_word_embedding(text, embeddings_index, embedding_dim):
+        words = text.split()
+        embedding_for_sentence = []
+        for word in words:
+            if word in embeddings_index:
+                embedding_for_sentence.append(embeddings_index[word])
+        if embedding_for_sentence:
+            return np.mean(embedding_for_sentence, axis=0)
+        else:
+            return np.zeros(embedding_dim) # Return zeros if no known words
+
+    X_word_embeddings = np.array([get_avg_word_embedding(msg, embeddings_index, embedding_dim) for msg in df['processed_plot']])
+
+    X_train_emb, X_test_emb, y_train_emb, y_test_emb = train_test_split(
+        X_word_embeddings, y_genres, test_size=0.2, random_state=42
+    )
+    print("Word Embeddings training feature shape:", X_train_emb.shape)
+else:
+    X_train_emb, X_test_emb, y_train_emb, y_test_emb = None, None, None, None # Set to None if not running
+print("-" * 50)
+
+
+# --- 6. Model Training and Evaluation ---
+print("--- 6. Model Training and Evaluation ---")
+
+def train_and_evaluate_multi_label_model(base_model, X_train, y_train, X_test, y_test, model_name, feature_type, genre_labels):
+    print(f"\n--- Training {model_name} with {feature_type} features (Multi-Label) ---")
+
+    # Use OneVsRestClassifier for multi-label classification
+    classifier = OneVsRestClassifier(base_model)
+    classifier.fit(X_train, y_train)
+    y_pred = classifier.predict(X_test)
+    y_pred_proba = classifier.predict_proba(X_test) # For thresholding if needed
+
+    # Metrics for multi-label classification
+    # F1-score: 'micro' (aggregates contributions of all classes) or 'macro' (averages F1 of each class)
+    # Micro F1 is often preferred for imbalanced multi-label datasets.
+    accuracy = accuracy_score(y_test, y_pred)
+    f1_micro = f1_score(y_test, y_pred, average='micro')
+    f1_macro = f1_score(y_test, y_pred, average='macro')
+    precision_micro = precision_score(y_test, y_pred, average='micro')
+    recall_micro = recall_score(y_test, y_pred, average='micro')
+
+    print(f"Accuracy (Jaccard Index for multi-label): {accuracy:.4f}")
+    print(f"Micro-averaged F1-Score: {f1_micro:.4f}")
+    print(f"Macro-averaged F1-Score: {f1_macro:.4f}")
+    print(f"Micro-averaged Precision: {precision_micro:.4f}")
+    print(f"Micro-averaged Recall: {recall_micro:.4f}")
+
+    print("\nClassification Report (Micro-averaged):")
+    # You can get a detailed report per class by iterating through genre_labels
+    # For brevity, a high-level report is usually sufficient.
+    print(classification_report(y_test, y_pred, target_names=genre_labels, zero_division=0))
+    print("-" * 30)
+
+
+# --- Classifiers with TF-IDF ---
+print("\n--- Evaluating Models with TF-IDF Features ---")
+# Naive Bayes (MultinomialNB)
+nb_tfidf = MultinomialNB()
+train_and_evaluate_multi_label_model(nb_tfidf, X_train_tfidf_vec, y_train_tfidf, X_test_tfidf_vec, y_test_tfidf, "Naive Bayes", "TF-IDF", genre_labels)
+
+# Logistic Regression
+lr_tfidf = LogisticRegression(max_iter=1000, solver='liblinear') # 'liblinear' often good for high-dim sparse data
+train_and_evaluate_multi_label_model(lr_tfidf, X_train_tfidf_vec, y_train_tfidf, X_test_tfidf_vec, y_test_tfidf, "Logistic Regression", "TF-IDF", genre_labels)
+
+# Support Vector Machine (LinearSVC)
+svm_tfidf = LinearSVC(dual=True) # dual=True is default for n_samples > n_features, dual=False for n_samples < n_features
+train_and_evaluate_multi_label_model(svm_tfidf, X_train_tfidf_vec, y_train_tfidf, X_test_tfidf_vec, y_test_tfidf, "Support Vector Machine", "TF-IDF", genre_labels)
+
+print("\n" + "=" * 60)
+
+# --- Classifiers with Word Embeddings (Average) ---
+if run_word_embeddings:
+    print("\n--- Evaluating Models with Average Word Embeddings Features ---")
+    # Note: For dense embeddings, Logistic Regression and SVM often perform better than Naive Bayes.
+    # Naive Bayes typically works best with count-based features or TF-IDF.
+
+    # Logistic Regression
+    lr_emb = LogisticRegression(max_iter=1000, solver='liblinear')
+    train_and_evaluate_multi_label_model(lr_emb, X_train_emb, y_train_emb, X_test_emb, y_test_emb, "Logistic Regression", "Word Embeddings", genre_labels)
+
+    # Support Vector Machine (SVC or LinearSVC)
+    # For dense vectors like word embeddings, SVC (RBF kernel) or LinearSVC can be used.
+    # LinearSVC is faster for large datasets.
+    svm_emb = LinearSVC(dual=True)
+    train_and_evaluate_multi_label_model(svm_emb, X_train_emb, y_train_emb, X_test_emb, y_test_emb, "Support Vector Machine", "Word Embeddings", genre_labels)
+else:
+    print("\nSkipping evaluation of models with Word Embeddings due to missing GloVe file.")
+
+print("\n--- Code Execution Complete ---")
+
+# --- Example Prediction (Optional) ---
+if input("\nDo you want to try a sample prediction? (yes/no): ").lower() == 'yes':
+    print("\n--- Testing a Sample Prediction ---")
+    sample_plot = "A young wizard discovers he has magical powers and must defeat an evil sorcerer to save the world."
+    processed_sample_plot = preprocess_text(sample_plot)
+
+    print(f"\nOriginal plot: {sample_plot}")
+    print(f"Processed plot: {processed_sample_plot}")
+
+    # Predict with the best performing model (e.g., Logistic Regression with TF-IDF)
+    print("\nPredicting with Logistic Regression (TF-IDF):")
+    sample_vec_tfidf = tfidf_vectorizer.transform([processed_sample_plot])
+    predicted_genres_binary = OneVsRestClassifier(lr_tfidf).predict(sample_vec_tfidf)
+    predicted_genres_labels = mlb.inverse_transform(predicted_genres_binary)
+
+    print(f"Predicted Genres: {predicted_genres_labels[0]}")
+
+    if run_word_embeddings:
+        print("\nPredicting with Logistic Regression (Word Embeddings):")
+        sample_vec_emb = np.array([get_avg_word_embedding(processed_sample_plot, embeddings_index, embedding_dim)])
+        predicted_genres_binary_emb = OneVsRestClassifier(lr_emb).predict(sample_vec_emb)
+        predicted_genres_labels_emb = mlb.inverse_transform(predicted_genres_binary_emb)
+        print(f"Predicted Genres (Word Embeddings): {predicted_genres_labels_emb[0]}")

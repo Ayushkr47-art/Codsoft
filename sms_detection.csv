@@ -1,0 +1,187 @@
+import pandas as pd
+import numpy as np
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer, WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# --- 1. Download NLTK Resources (Run once) ---
+try:
+    nltk.data.find('corpora/stopwords')
+except nltk.downloader.DownloadError:
+    nltk.download('stopwords')
+try:
+    nltk.data.find('corpora/wordnet')
+except nltk.downloader.DownloadError:
+    nltk.download('wordnet')
+
+# --- 2. Data Loading and Initial Exploration ---
+print("--- 1. Loading Data ---")
+try:
+    df = pd.read_csv('spam.csv', encoding='latin-1')
+except UnicodeDecodeError:
+    df = pd.read_csv('spam.csv', encoding='ISO-8859-1') # Try alternative encoding
+
+# Rename columns for clarity and drop irrelevant ones
+df = df.rename(columns={'v1': 'label', 'v2': 'message'})
+df = df[['label', 'message']] # Keep only relevant columns
+
+print("Dataset head:")
+print(df.head())
+print("\nClass distribution:")
+print(df['label'].value_counts())
+print("-" * 50)
+
+# --- 3. Data Preprocessing ---
+print("--- 2. Preprocessing Text Data ---")
+stemmer = PorterStemmer()
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
+
+def preprocess_text(text):
+    # Convert to lowercase
+    text = text.lower()
+    # Remove punctuation and numbers
+    text = re.sub(r'[^a-z\s]', '', text)
+    # Tokenize
+    words = text.split()
+    # Remove stopwords and apply lemmatization
+    # Lemmatization is generally preferred over stemming for better accuracy
+    words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
+    return ' '.join(words)
+
+df['processed_message'] = df['message'].apply(preprocess_text)
+
+print("Processed message example:")
+print(df['processed_message'].iloc[0])
+print("-" * 50)
+
+# --- 4. Feature Engineering ---
+
+# Convert labels to numerical for training
+label_mapping = {'ham': 0, 'spam': 1}
+df['numerical_label'] = df['label'].map(label_mapping)
+
+#### A. TF-IDF (Term Frequency-Inverse Document Frequency) ####
+print("--- 3. Feature Engineering: TF-IDF ---")
+X_train_tfidf, X_test_tfidf, y_train_tfidf, y_test_tfidf = train_test_split(
+    df['processed_message'], df['numerical_label'], test_size=0.2, random_state=42, stratify=df['numerical_label']
+)
+
+tfidf_vectorizer = TfidfVectorizer(max_features=5000) # Limit features to top 5000
+X_train_tfidf_vec = tfidf_vectorizer.fit_transform(X_train_tfidf)
+X_test_tfidf_vec = tfidf_vectorizer.transform(X_test_tfidf)
+
+print("TF-IDF training feature shape:", X_train_tfidf_vec.shape)
+print("-" * 50)
+
+
+#### B. Word Embeddings (Using Pre-trained GloVe) ####
+print("--- 4. Feature Engineering: Word Embeddings (GloVe) ---")
+# This part is more complex for direct classifier input, often used with Neural Networks.
+# For simple classifiers, we'll use average word embeddings.
+
+# Load GloVe embeddings
+embeddings_index = {}
+glove_path = 'glove.6B.100d.txt' # Make sure this file is in the same directory
+try:
+    with open(glove_path, encoding='utf-8') as f:
+        for line in f:
+            values = line.split()
+            word = values[0]
+            coefs = np.asarray(values[1:], dtype='float32')
+            embeddings_index[word] = coefs
+    print(f"Loaded {len(embeddings_index)} word vectors from {glove_path}")
+except FileNotFoundError:
+    print(f"Error: GloVe file '{glove_path}' not found. Please download it and place it in the same directory.")
+    print("Skipping Word Embeddings part.")
+    run_word_embeddings = False
+else:
+    run_word_embeddings = True
+
+if run_word_embeddings:
+    embedding_dim = 100 # Dimension of your GloVe vectors (e.g., 100d)
+
+    def get_avg_word_embedding(text, embeddings_index, embedding_dim):
+        words = text.split()
+        embedding_for_sentence = []
+        for word in words:
+            if word in embeddings_index:
+                embedding_for_sentence.append(embeddings_index[word])
+        if embedding_for_sentence:
+            return np.mean(embedding_for_sentence, axis=0)
+        else:
+            return np.zeros(embedding_dim) # Return zeros if no known words
+
+    X_word_embeddings = np.array([get_avg_word_embedding(msg, embeddings_index, embedding_dim) for msg in df['processed_message']])
+
+    X_train_emb, X_test_emb, y_train_emb, y_test_emb = train_test_split(
+        X_word_embeddings, df['numerical_label'], test_size=0.2, random_state=42, stratify=df['numerical_label']
+    )
+    print("Word Embeddings training feature shape:", X_train_emb.shape)
+else:
+    X_train_emb, X_test_emb, y_train_emb, y_test_emb = None, None, None, None # Set to None if not running
+print("-" * 50)
+
+# --- 5. Model Training and Evaluation ---
+print("--- 5. Model Training and Evaluation ---")
+
+def train_and_evaluate_model(model, X_train, y_train, X_test, y_test, model_name, feature_type):
+    print(f"\n--- Training {model_name} with {feature_type} features ---")
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, pos_label=1) # 'spam' is positive class (1)
+    recall = recall_score(y_test, y_pred, pos_label=1)
+    f1 = f1_score(y_test, y_pred, pos_label=1)
+
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1-Score: {f1:.4f}")
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, target_names=['ham', 'spam']))
+    print("-" * 30)
+
+
+# --- Classifiers with TF-IDF ---
+print("\n--- Evaluating Models with TF-IDF Features ---")
+# Naive Bayes (MultinomialNB)
+nb_tfidf = MultinomialNB()
+train_and_evaluate_model(nb_tfidf, X_train_tfidf_vec, y_train_tfidf, X_test_tfidf_vec, y_test_tfidf, "Naive Bayes", "TF-IDF")
+
+# Logistic Regression
+lr_tfidf = LogisticRegression(max_iter=1000, solver='liblinear') # 'liblinear' is good for small datasets
+train_and_evaluate_model(lr_tfidf, X_train_tfidf_vec, y_train_tfidf, X_test_tfidf_vec, y_test_tfidf, "Logistic Regression", "TF-IDF")
+
+# Support Vector Machine (SVC)
+svm_tfidf = SVC(kernel='linear', probability=True) # probability=True for predict_proba if needed
+train_and_evaluate_model(svm_tfidf, X_train_tfidf_vec, y_train_tfidf, X_test_tfidf_vec, y_test_tfidf, "Support Vector Machine", "TF-IDF")
+
+print("\n" + "=" * 60)
+
+# --- Classifiers with Word Embeddings (Average) ---
+if run_word_embeddings:
+    print("\n--- Evaluating Models with Average Word Embeddings Features ---")
+    # Logistic Regression
+    lr_emb = LogisticRegression(max_iter=1000, solver='liblinear')
+    train_and_evaluate_model(lr_emb, X_train_emb, y_train_emb, X_test_emb, y_test_emb, "Logistic Regression", "Word Embeddings")
+
+    # Support Vector Machine (SVC)
+    svm_emb = SVC(kernel='linear', probability=True)
+    train_and_evaluate_model(svm_emb, X_train_emb, y_train_emb, X_test_emb, y_test_emb, "Support Vector Machine", "Word Embeddings")
+else:
+    print("\nSkipping evaluation of models with Word Embeddings due to missing GloVe file.")
+
+print("\n--- Code Execution Complete ---")
